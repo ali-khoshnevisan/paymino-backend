@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+media/
+staticfiles/
+
+# SQLite (development only)
+db.sqlite3
+db.sqlite3-journal
+
+# Migrations are generated per environment (keep the package marker)
+*/migrations/*
+!*/migrations/__init__.py
