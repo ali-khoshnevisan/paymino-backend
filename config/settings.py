@@ -148,6 +148,10 @@ CORS_URLS_REGEX = r'^/api/.*$'
 CORS_ALLOW_HEADERS = ['accept', 'content-type', 'idempotency-key', 'x-requested-with']
 # Browser-origin check for state-changing API calls (replaces CSRF tokens for the cookie-based API)
 API_ALLOWED_ORIGINS = set(CORS_ALLOWED_ORIGINS + [FRONTEND_URL, API_PUBLIC_URL])
+# Development: accept the frontend on any local host/port (localhost:3000, 127.0.0.1:3001, ...)
+LOCAL_ORIGIN_REGEX = r'^http://(localhost|127\.0\.0\.1)(:\d+)?$'
+CORS_ALLOWED_ORIGIN_REGEXES = [LOCAL_ORIGIN_REGEX] if DEBUG else []
+API_ALLOWED_ORIGIN_REGEX = LOCAL_ORIGIN_REGEX if DEBUG else None
 TRUST_X_FORWARDED_FOR = env_bool('TRUST_X_FORWARDED_FOR', False)
 if env_bool('BEHIND_PROXY', False):
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -168,13 +172,14 @@ REST_FRAMEWORK = {
 
 # ------------------------------- Cache (throttling) -------------------------------
 REDIS_URL = env('REDIS_URL')
-CACHES = {
-    'default': (
-        {'BACKEND': 'django.core.cache.backends.redis.RedisCache', 'LOCATION': REDIS_URL}
-        if REDIS_URL
-        else {'BACKEND': 'django.core.cache.backends.db.DatabaseCache', 'LOCATION': 'paymino_cache'}
-    )
-}
+if REDIS_URL:
+    _cache = {'BACKEND': 'django.core.cache.backends.redis.RedisCache', 'LOCATION': REDIS_URL}
+elif DEBUG:
+    _cache = {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}  # dev: no setup needed
+else:
+    # production without Redis: run `python manage.py createcachetable` once
+    _cache = {'BACKEND': 'django.core.cache.backends.db.DatabaseCache', 'LOCATION': 'paymino_cache'}
+CACHES = {'default': _cache}
 
 # ------------------------------- Email -------------------------------
 EMAIL_BACKEND = env('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')

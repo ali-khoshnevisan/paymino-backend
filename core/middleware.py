@@ -1,4 +1,5 @@
 import json
+import re
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -19,6 +20,13 @@ def _origin_of(url: str) -> str | None:
     return f'{u.scheme}://{u.netloc}'
 
 
+def _origin_allowed(origin: str) -> bool:
+    if origin in settings.API_ALLOWED_ORIGINS:
+        return True
+    pattern = getattr(settings, 'API_ALLOWED_ORIGIN_REGEX', None)
+    return bool(pattern and re.match(pattern, origin))
+
+
 class ApiOriginCheckMiddleware:
     """
     CSRF protection for the cookie-authenticated JSON API: state-changing requests to /api/
@@ -32,7 +40,7 @@ class ApiOriginCheckMiddleware:
         path = request.path
         if path.startswith('/api/') and request.method not in SAFE_METHODS and not path.startswith(EXEMPT_PREFIXES):
             origin = request.headers.get('Origin') or _origin_of(request.headers.get('Referer', ''))
-            if not origin or origin not in settings.API_ALLOWED_ORIGINS:
+            if not origin or not _origin_allowed(origin):
                 body = json.dumps({'detail': 'درخواست از مبدأ نامعتبر ارسال شده است.', 'code': 'bad_origin'}, ensure_ascii=False)
                 return HttpResponse(body, status=403, content_type='application/json; charset=utf-8')
         return self.get_response(request)
