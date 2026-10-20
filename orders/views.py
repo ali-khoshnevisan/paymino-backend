@@ -6,20 +6,39 @@ from catalog.models import Product, products_with_variants
 from core.auth import require_user
 from core.errors import ApiError, field_errors
 from core.models import SiteSettings
-from core.utils import EMAIL_RE, as_str, throttle
+from core.utils import EMAIL_RE, as_str, client_ip, throttle
 from payments.services import _add_event, create_invoice
 
 from .dto import order_dto, order_list_item
-from .models import Order, OrderEvent, OrderItem
-from .pricing import build_quote, parse_cart_items
+from . import coupons
+from .models import Coupon, Order, OrderEvent, OrderItem
+from .pricing import build_quote, parse_cart_items, public_quote
 from .services import get_owned_order, next_order_number, order_queryset
 from .status import ACTIVE_ORDER_STATES, can_transition_order, is_payable
 
 
+def _coupon_code(request, d):
+    return coupons.normalize_code(d.get('couponCode'))
+
+
+def _limit_misses(request, q):
+    """Codes must not be guessable: count unknown or unusable codes per account (or per IP when signed out)."""
+    if q['coupon'] and not q['coupon']['valid']:
+        user = _user_or_none(request)
+        throttle(f"coupon-miss:{user.pk if user else client_ip(request)}", 20, 600)
+
+
+def _user_or_none(request):
+    return request.user if getattr(request, 'user', None) is not None and request.user.is_authenticated else None
+
+
 @api_view(['POST'])
 def quote(request):
-    items = parse_cart_items(request.data.get('items') if isinstance(request.data, dict) else None)
-    return Response(build_quote(items))
+    d = request.data if isinstance(request.data, dict) else {}
+    items = parse_cart_items(d.get('items'))
+    q = build_quote(items, _coupon_code(request, d), _user_or_none(request))
+    _limit_misses(request, q)
+    return Response(public_quote(q))
 
 
 @api_view(['GET', 'POST'])
@@ -78,21 +97,37 @@ def _create_order(request, user):
     if errors:
         field_errors(errors)
 
-    q = build_quote(items)
+    code = _coupon_code(request, d)
+    q = build_quote(items, code, user)
+    if code and not q['coupon']['valid']:
+        _limit_misses(request, q)
+        raise ApiError(409, q['coupon']['message'], code='coupon_invalid', quote=public_quote(q))
     blocking = [l for l in q['lines'] if not l['available'] or (l.get('issue') or {}).get('code') in ('price_changed', 'quantity_adjusted')]
     try:
         expected = int(d.get('expectedTotalToman'))
     except (TypeError, ValueError):
         expected = -1
     if blocking or q['totalToman'] != expected:
-        raise ApiError(409, 'قیمت یا موجودی برخی اقلام تغییر کرده است. لطفاً سبد خرید را دوباره بررسی کنید.', code='quote_changed', quote=q)
+        raise ApiError(409, 'قیمت یا موجودی برخی اقلام تغییر کرده است. لطفاً سبد خرید را دوباره بررسی کنید.', code='quote_changed', quote=public_quote(q))
 
     try:
         with transaction.atomic():
+            coupon = q['_coupon']
+            if coupon:
+                # Lock the code and count its uses again, so two orders can't both take the last use
+                coupon = Coupon.objects.select_for_update().get(pk=coupon.pk)
+                try:
+                    still = coupons.check(coupon, sum(l['lineTotalToman'] for l in q['lines']), user=user)
+                except coupons.CouponError as e:
+                    raise ApiError(409, e.message, code='coupon_invalid', quote=public_quote(build_quote(items, code, user)))
+                if still != q['couponDiscountToman']:
+                    raise ApiError(409, 'مبلغ تخفیف این کد تغییر کرده است. سبد خرید را دوباره بررسی کنید.', code='quote_changed',
+                                   quote=public_quote(build_quote(items, code, user)))
             order = Order.objects.create(
                 number=next_order_number(), user=user, idempotency_key=idem, status='pending_payment',
                 payment_status='awaiting_payment', subtotal_toman=q['subtotalToman'],
                 service_fee_toman=q['serviceFeeToman'], discount_toman=q['discountToman'], total_toman=q['totalToman'],
+                coupon=coupon, coupon_code=coupon.code if coupon else '', coupon_discount_toman=q['couponDiscountToman'],
             )
             for pos, line in enumerate(q['lines']):
                 p = products[line['productId']]

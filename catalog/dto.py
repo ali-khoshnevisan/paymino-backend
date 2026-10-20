@@ -8,8 +8,12 @@ def _num(v):
     return int(f) if f.is_integer() else f
 
 
-def variant_dto(v):
-    d = {'id': v.id, 'label': v.label, 'priceToman': int(v.price_toman), 'available': v.available}
+def variant_dto(v, percent=0):
+    # priceToman is always what the customer pays; originalPriceToman only appears when a discount lowers it.
+    final = v.final_price(percent)
+    d = {'id': v.id, 'label': v.label, 'priceToman': final, 'available': v.available}
+    if final < int(v.price_toman):
+        d['originalPriceToman'] = int(v.price_toman)
     if v.face_value is not None:
         d['faceValue'] = _num(v.face_value)
     if v.face_currency:
@@ -25,7 +29,15 @@ def active_variants(p):
     return [v for v in p.variants.all() if v.is_active]
 
 
+def _discount_fields(p, percent):
+    return {
+        'discountPercent': percent or None,
+        'discountEndsAt': iso(p.discount_ends_at) if percent else None,
+    }
+
+
 def product_dto(p):
+    percent = p.active_discount_percent()
     return {
         'id': p.id,
         'slug': p.slug,
@@ -45,15 +57,24 @@ def product_dto(p):
         'refundPolicy': p.refund_policy,
         'requiredFields': p.required_fields or [],
         'maxQuantityPerItem': p.max_quantity_per_item,
-        'variants': [variant_dto(v) for v in active_variants(p)],
+        'variants': [variant_dto(v, percent) for v in active_variants(p)],
         'available': p.is_active,
         'createdAt': iso(p.created_at),
+        **_discount_fields(p, percent),
+        'article': p.article,
+        'faqs': p.faqs or [],
+        'seoTitle': p.seo_title or None,
+        'seoDescription': p.seo_description or None,
     }
 
 
 def product_list_item(p):
+    percent = p.active_discount_percent()
     variants = active_variants(p)
-    prices = [int(v.price_toman) for v in variants if v.available]
+    # (price paid, list price) of each variant that can be bought; the cheapest one is the card's "from" price
+    offers = [(v.final_price(percent), int(v.price_toman)) for v in variants if v.available]
+    cheapest = min(offers) if offers else None
+    discounted = any(final < listed for final, listed in offers)
     durations = []
     for v in variants:
         if v.duration_months and v.duration_months not in durations:
@@ -69,9 +90,11 @@ def product_list_item(p):
         'shortDescription': p.short_description,
         'imageUrl': media_url(p.image),
         'regions': p.regions or [],
-        'available': p.is_active and bool(prices),
+        'available': p.is_active and bool(offers),
         'createdAt': iso(p.created_at),
-        'minPriceToman': min(prices) if prices else None,
+        'minPriceToman': cheapest[0] if cheapest else None,
+        'minOriginalPriceToman': cheapest[1] if cheapest and cheapest[0] < cheapest[1] else None,
         'variantCount': len(variants),
         'durations': durations,
+        **_discount_fields(p, percent if discounted else 0),
     }

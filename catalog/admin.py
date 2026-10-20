@@ -10,7 +10,7 @@ class VariantInline(admin.TabularInline):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ['name', 'brand_name', 'category', 'type', 'is_active', 'popularity']
+    list_display = ['name', 'brand_name', 'category', 'type', 'is_active', 'popularity', 'discount_percent']
     list_filter = ['category', 'type', 'is_active']
     search_fields = ['name', 'brand_name', 'slug']
     inlines = [VariantInline]

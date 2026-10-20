@@ -34,6 +34,8 @@ def order_dto(o):
         'subtotalToman': int(o.subtotal_toman),
         'serviceFeeToman': int(o.service_fee_toman),
         'discountToman': int(o.discount_toman),
+        'couponCode': o.coupon_code or None,
+        'couponDiscountToman': int(o.coupon_discount_toman),
         'totalToman': int(o.total_toman),
         'paymentMethod': {'currency': o.payment_currency, 'network': o.payment_network} if o.payment_currency else None,
         'invoice': invoice_dto(o.current_invoice),

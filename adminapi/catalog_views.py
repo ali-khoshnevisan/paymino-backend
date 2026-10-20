@@ -2,7 +2,7 @@ from django.db import transaction
 from django.db.models import Count, ProtectedError, Q
 from rest_framework.response import Response
 
-from catalog.models import CATEGORY_ICONS, PRODUCT_TYPES, STOCK_MODES, Category, GiftCode, Product, Provider, Variant, products_with_variants, variants_with_stock
+from catalog.models import CATEGORY_ICONS, MAX_DISCOUNT_PERCENT, PRODUCT_TYPES, STOCK_MODES, Category, GiftCode, Product, Provider, Variant, products_with_variants, variants_with_stock
 from core.errors import ApiError, field_errors
 from core.pagination import paginate
 from core.utils import normalize_search
@@ -130,6 +130,26 @@ def _required_fields(value, f: Form):
     return out
 
 
+def _faqs(value, f: Form):
+    if not isinstance(value, list) or len(value) > 20:
+        f.err('faqs', 'فهرست سؤالات نامعتبر است (حداکثر ۲۰ مورد).')
+        return None
+    out = []
+    for i, item in enumerate(value):
+        q = str((item or {}).get('question') or '').strip() if isinstance(item, dict) else ''
+        a = str((item or {}).get('answer') or '').strip() if isinstance(item, dict) else ''
+        if not q and not a:
+            continue  # empty row left in the editor
+        if not q or not a:
+            f.err('faqs', f'سؤال {i + 1}: متن سؤال و پاسخ هر دو لازم است.')
+            return None
+        if len(q) > 200 or len(a) > 2000:
+            f.err('faqs', f'سؤال {i + 1}: سؤال حداکثر ۲۰۰ و پاسخ حداکثر ۲۰۰۰ کاراکتر.')
+            return None
+        out.append({'question': q, 'answer': a})
+    return out
+
+
 def _product_form(data, partial, instance=None):
     f = Form(data, partial)
     f.slug('slug', 'slug')
@@ -148,7 +168,17 @@ def _product_form(data, partial, instance=None):
     f.text('refundPolicy', 'refund_policy', required=False, max_len=5000)
     f.integer('maxQuantityPerItem', 'max_quantity_per_item', min_value=1, max_value=100)
     f.integer('popularity', 'popularity', required=False)
+    f.integer('discountPercent', 'discount_percent', required=False, min_value=0, max_value=MAX_DISCOUNT_PERCENT)
+    f.datetime('discountStartsAt', 'discount_starts_at')
+    f.datetime('discountEndsAt', 'discount_ends_at')
     f.boolean('isActive', 'is_active')
+    f.text('article', 'article', required=False, max_len=20000)
+    f.text('seoTitle', 'seo_title', required=False, max_len=70)
+    f.text('seoDescription', 'seo_description', required=False, max_len=170)
+    if not f.skip('faqs'):
+        faqs = _faqs(data.get('faqs', []), f)
+        if faqs is not None:
+            f.clean['faqs'] = faqs
     if not f.skip('requiredFields'):
         rf = _required_fields(data.get('requiredFields', []), f)
         if rf is not None:
@@ -161,6 +191,10 @@ def _product_form(data, partial, instance=None):
         errors['providerId'] = ['برند نامعتبر است.']
     if 'slug' in clean and Product.objects.filter(slug=clean['slug']).exclude(pk=getattr(instance, 'pk', None)).exists():
         errors['slug'] = ['این نامک قبلاً استفاده شده است.']
+    starts = clean.get('discount_starts_at', getattr(instance, 'discount_starts_at', None))
+    ends = clean.get('discount_ends_at', getattr(instance, 'discount_ends_at', None))
+    if starts and ends and ends <= starts:
+        errors['discountEndsAt'] = ['پایان تخفیف باید بعد از شروع آن باشد.']
     if errors:
         field_errors(errors)
     return clean

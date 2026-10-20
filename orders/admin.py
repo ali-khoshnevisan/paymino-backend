@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Delivery, Order, OrderEvent, OrderItem
+from .models import Coupon, Delivery, Order, OrderEvent, OrderItem
 
 
 class ItemInline(admin.TabularInline):
@@ -26,3 +26,10 @@ class OrderAdmin(admin.ModelAdmin):
 
 
 admin.site.register(Delivery)
+
+
+@admin.register(Coupon)
+class CouponAdmin(admin.ModelAdmin):
+    list_display = ['code', 'kind', 'value', 'is_active', 'usage_limit', 'per_user_limit', 'ends_at']
+    list_filter = ['kind', 'is_active']
+    search_fields = ['code', 'note']

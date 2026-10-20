@@ -1,6 +1,7 @@
 from django.urls import path
 
 from . import catalog_views as c
+from . import coupon_views as cp
 from . import dashboard_views as d
 from . import order_views as o
 from . import settings_views as s
@@ -20,6 +21,8 @@ urlpatterns = [
     path('variants/<str:pk>', c.variant_detail),
     path('variants/<str:pk>/codes', c.variant_codes),
     path('codes/<int:pk>/void', c.code_void),
+    path('coupons', cp.coupon_list),
+    path('coupons/<int:pk>', cp.coupon_detail),
     path('orders', o.orders),
     path('orders/<str:pk>', o.order_detail),
     path('orders/<str:pk>/status', o.order_status),

@@ -6,11 +6,12 @@ from unittest import mock
 
 from django.core.management import call_command
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from catalog.models import GiftCode, Variant
-from orders.models import Order
+from catalog.models import GiftCode, Product, Variant
+from orders.models import Coupon, Order
 from payments.models import PaymentInvoice
 
 ORIGIN = 'http://localhost:3000'
@@ -125,6 +126,113 @@ class PublicApiTests(Base):
                                         'expectedTotalToman': q['totalToman']}, format='json')
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()['code'], 'quote_changed')
+
+    def test_product_discount(self):
+        Product.objects.filter(pk='p_steam_us').update(discount_percent=10)
+        card = next(i for i in self.c.get('/api/catalog/products?category=steam').json()['results'] if i['slug'] == 'steam-wallet-usd')
+        self.assertEqual(card['discountPercent'], 10)
+        self.assertLess(card['minPriceToman'], card['minOriginalPriceToman'])
+        detail = self.c.get('/api/catalog/products/steam-wallet-usd').json()
+        v = next(x for x in detail['variants'] if x['id'] == 'steam-us-20')
+        self.assertEqual((v['priceToman'], v['originalPriceToman']), (2_003_000, 2_226_000))  # 2,003,400 → rounded to 1,000
+
+        q = self.c.post('/api/cart/quote', {'items': [steam_item(2)]}, format='json').json()
+        line = q['lines'][0]
+        self.assertEqual((line['unitPriceToman'], line['listUnitPriceToman'], line['lineTotalToman']), (2_003_000, 2_226_000, 4_006_000))
+        self.assertEqual((q['subtotalToman'], q['discountToman']), (4_452_000, 446_000))
+        self.assertEqual(q['totalToman'], q['subtotalToman'] - q['discountToman'] + q['serviceFeeToman'])
+        r = self.place([steam_item(2)])
+        self.assertEqual(r.status_code, 201, r.content)
+        order = r.json()
+        self.assertEqual((order['discountToman'], order['totalToman']), (446_000, q['totalToman']))
+        self.assertEqual(order['items'][0]['unitPriceToman'], 2_003_000)
+
+    def test_discount_window(self):
+        past, future = timezone.now() - timedelta(days=1), timezone.now() + timedelta(days=1)
+        for starts, ends in ((None, past), (future, None)):
+            Product.objects.filter(pk='p_steam_us').update(discount_percent=20, discount_starts_at=starts, discount_ends_at=ends)
+            card = next(i for i in self.c.get('/api/catalog/products?category=steam').json()['results'] if i['slug'] == 'steam-wallet-usd')
+            self.assertIsNone(card['discountPercent'])
+            self.assertIsNone(card['minOriginalPriceToman'])
+            q = self.c.post('/api/cart/quote', {'items': [steam_item(1)]}, format='json').json()
+            self.assertEqual((q['lines'][0]['unitPriceToman'], q['discountToman']), (2_226_000, 0))
+
+    def test_discount_ending_blocks_stale_order(self):
+        Product.objects.filter(pk='p_steam_us').update(discount_percent=10)
+        items = [steam_item(1)]
+        q = self.c.post('/api/cart/quote', {'items': items}, format='json').json()
+        Product.objects.filter(pk='p_steam_us').update(discount_ends_at=timezone.now() - timedelta(seconds=1))
+        r = self.c.post('/api/orders', {'items': items, 'currency': 'USDT', 'network': 'TRC20', 'acceptedTerms': True,
+                                        'expectedTotalToman': q['totalToman']}, format='json')
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()['code'], 'quote_changed')
+
+    def coupon_quote(self, code, items=None):
+        return self.c.post('/api/cart/quote', {'items': items or [steam_item(1)], 'couponCode': code}, format='json').json()
+
+    def place_with(self, code, items=None):
+        items = items or [steam_item(1)]
+        q = self.coupon_quote(code, items)
+        return self.c.post('/api/orders', {'items': items, 'currency': 'USDT', 'network': 'TRC20', 'acceptedTerms': True,
+                                           'couponCode': code, 'expectedTotalToman': q['totalToman']}, format='json')
+
+    def test_coupon_quote_and_order(self):
+        Coupon.objects.create(code='SAVE10', kind='percent', value=10, max_discount_toman=100_000, per_user_limit=1)
+        q = self.coupon_quote(' save۱۰ ')  # any case, Persian digits, stray spaces
+        self.assertEqual((q['coupon']['code'], q['coupon']['valid'], q['couponDiscountToman']), ('SAVE10', True, 100_000))  # 10% capped
+        payable = sum(l['lineTotalToman'] for l in q['lines'])
+        self.assertEqual(q['totalToman'], payable - 100_000 + q['serviceFeeToman'])
+        no_code = self.coupon_quote('')
+        self.assertLess(q['serviceFeeToman'], no_code['serviceFeeToman'] + 1)  # fee is charged on the reduced amount
+        self.assertIsNone(no_code['coupon'])
+
+        r = self.place_with('SAVE10')
+        self.assertEqual(r.status_code, 201, r.content)
+        order = r.json()
+        self.assertEqual((order['couponCode'], order['couponDiscountToman'], order['totalToman']), ('SAVE10', 100_000, q['totalToman']))
+
+        # per-user limit: the same user cannot use it again…
+        self.assertEqual(self.coupon_quote('SAVE10')['coupon']['reason'], 'coupon_used_by_user')
+        r = self.place_with('SAVE10')
+        self.assertEqual((r.status_code, r.json()['code']), (409, 'coupon_invalid'))
+        # …until the order that used it is cancelled
+        self.c.post(f"/api/orders/{order['id']}/cancel", {}, format='json')
+        self.assertTrue(self.coupon_quote('SAVE10')['coupon']['valid'])
+
+    def test_coupon_rejections(self):
+        past, future = timezone.now() - timedelta(days=1), timezone.now() + timedelta(days=1)
+        Coupon.objects.create(code='OLD', kind='percent', value=10, ends_at=past)
+        Coupon.objects.create(code='SOON', kind='percent', value=10, starts_at=future)
+        Coupon.objects.create(code='OFF', kind='percent', value=10, is_active=False)
+        Coupon.objects.create(code='BIGORDER', kind='percent', value=10, min_order_toman=50_000_000)
+        Coupon.objects.create(code='ONCE', kind='fixed', value=50_000, usage_limit=1, per_user_limit=None)
+        reasons = {c: self.coupon_quote(c)['coupon']['reason'] for c in ('NOPE', 'OLD', 'SOON', 'OFF', 'BIGORDER', '<script>')}
+        self.assertEqual(reasons, {'NOPE': 'coupon_invalid', 'OLD': 'coupon_expired', 'SOON': 'coupon_invalid', 'OFF': 'coupon_invalid',
+                                   'BIGORDER': 'coupon_min_order', '<script>': 'coupon_invalid'})
+        bad = self.coupon_quote('OLD')
+        self.assertEqual((bad['couponDiscountToman'], bad['totalToman']), (0, self.coupon_quote('')['totalToman']))
+
+        # total usage limit is shared between users
+        self.assertEqual(self.place_with('ONCE').status_code, 201)
+        other = Client()
+        other.force_login(User.objects.create_user('o@test.ir', 'Test1234', full_name='دیگری'))
+        q = other.post('/api/cart/quote', {'items': [steam_item(1)], 'couponCode': 'ONCE'}, format='json').json()
+        self.assertEqual(q['coupon']['reason'], 'coupon_used_up')
+
+    def test_coupon_guessing_is_throttled(self):
+        from django.core.cache import cache
+        cache.clear()
+        codes = [self.c.post('/api/cart/quote', {'items': [steam_item(1)], 'couponCode': f'GUESS{i}'}, format='json').status_code for i in range(22)]
+        self.assertEqual(codes[:20], [200] * 20)
+        self.assertEqual(codes[-1], 429)
+        cache.clear()
+
+    def test_fixed_coupon_never_zeroes_the_total(self):
+        Coupon.objects.create(code='HUGE', kind='fixed', value=10**9)
+        q = self.coupon_quote('HUGE')
+        payable = sum(l['lineTotalToman'] for l in q['lines'])
+        self.assertEqual(q['couponDiscountToman'], payable - 1000)
+        self.assertGreater(q['totalToman'], 0)
 
     def test_required_fields_validated(self):
         item = tv_item()
@@ -262,6 +370,59 @@ class AdminApiTests(Base):
         r = self.a.patch(f'/api/admin/products/{pid}', {'isActive': False}, format='json').json()
         self.assertFalse(r['isActive'])
         self.assertEqual(self.c.get('/api/catalog/products/new-card').status_code, 404)
+
+    def test_product_discount_admin(self):
+        url = '/api/admin/products/p_steam_us'
+        self.assertIn('discountPercent', self.a.patch(url, {'discountPercent': 95}, format='json').json()['errors'])
+        r = self.a.patch(url, {'discountStartsAt': '2030-01-02T00:00:00Z', 'discountEndsAt': '2030-01-01T00:00:00Z'}, format='json')
+        self.assertIn('discountEndsAt', r.json()['errors'])
+        self.assertIn('discountStartsAt', self.a.patch(url, {'discountStartsAt': 'tomorrow'}, format='json').json()['errors'])
+        r = self.a.patch(url, {'discountPercent': 15, 'discountStartsAt': None, 'discountEndsAt': '2099-01-01T00:00:00Z'}, format='json').json()
+        self.assertEqual((r['discountPercent'], r['discountEndsAt'], r['discountActive']), (15, '2099-01-01T00:00:00Z', True))
+        row = next(x for x in self.a.get('/api/admin/products').json()['results'] if x['id'] == 'p_steam_us')
+        self.assertEqual(row['discountPercent'], 15)
+        r = self.a.patch(url, {'discountPercent': 0}, format='json').json()
+        self.assertFalse(r['discountActive'])
+
+    def test_product_seo_content(self):
+        url = '/api/admin/products/p_steam_us'
+        r = self.a.patch(url, {'faqs': [{'question': 'سؤال؟', 'answer': ''}]}, format='json')
+        self.assertIn('faqs', r.json()['errors'])
+        self.assertIn('seoTitle', self.a.patch(url, {'seoTitle': 'x' * 71}, format='json').json()['errors'])
+        body = {'article': 'پاراگراف اول\n\n## عنوان', 'seoTitle': 'عنوان سئو', 'seoDescription': 'توضیح',
+                'faqs': [{'question': 'سؤال؟', 'answer': 'پاسخ.'}, {'question': '', 'answer': ''}]}
+        r = self.a.patch(url, body, format='json').json()
+        self.assertEqual(r['faqs'], [{'question': 'سؤال؟', 'answer': 'پاسخ.'}])  # empty editor row dropped
+        p = self.c.get('/api/catalog/products/steam-wallet-usd').json()
+        self.assertEqual((p['article'], p['seoTitle'], p['seoDescription'], len(p['faqs'])), (body['article'], 'عنوان سئو', 'توضیح', 1))
+        # seeding fills only empty fields
+        call_command('seed_seo_content', stdout=open('/dev/null', 'w'))
+        self.assertEqual(self.c.get('/api/catalog/products/steam-wallet-usd').json()['seoTitle'], 'عنوان سئو')
+
+    def test_coupon_admin(self):
+        body = {'code': 'welcome-1', 'kind': 'percent', 'value': 15, 'maxDiscountToman': 200000, 'isActive': True}
+        r = self.a.post('/api/admin/coupons', body, format='json')
+        self.assertEqual(r.status_code, 201, r.content)
+        c = r.json()
+        self.assertEqual((c['code'], c['usedCount'], c['perUserLimit']), ('WELCOME-1', 0, None))
+        self.assertIn('code', self.a.post('/api/admin/coupons', body, format='json').json()['errors'])  # duplicate
+        self.assertIn('value', self.a.post('/api/admin/coupons', dict(body, code='X150', value=150), format='json').json()['errors'])
+        self.assertIn('code', self.a.post('/api/admin/coupons', dict(body, code='a b!'), format='json').json()['errors'])
+        r = self.a.patch(f"/api/admin/coupons/{c['id']}", {'startsAt': '2030-01-02T00:00:00Z', 'endsAt': '2030-01-01T00:00:00Z'}, format='json')
+        self.assertIn('endsAt', r.json()['errors'])
+        self.assertEqual(self.c.get('/api/admin/coupons').status_code, 403)
+
+        self.assertEqual(self.place_with_admin_code('WELCOME-1').status_code, 201)
+        row = next(x for x in self.a.get('/api/admin/coupons').json()['results'] if x['id'] == c['id'])
+        self.assertEqual(row['usedCount'], 1)
+        self.assertEqual(self.a.delete(f"/api/admin/coupons/{c['id']}").status_code, 409)  # used → deactivate instead
+        self.assertFalse(self.a.patch(f"/api/admin/coupons/{c['id']}", {'isActive': False}, format='json').json()['isActive'])
+
+    def place_with_admin_code(self, code):
+        items = [steam_item(1)]
+        q = self.c.post('/api/cart/quote', {'items': items, 'couponCode': code}, format='json').json()
+        return self.c.post('/api/orders', {'items': items, 'currency': 'USDT', 'network': 'TRC20', 'acceptedTerms': True,
+                                           'couponCode': code, 'expectedTotalToman': q['totalToman']}, format='json')
 
     def test_image_upload_rejects_non_images(self):
         from django.core.files.uploadedfile import SimpleUploadedFile

@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from core import telegram
 from core.errors import ApiError
 from core.models import SiteSettings
 from core.utils import iso, now
@@ -226,7 +227,8 @@ def apply_payment_event(*, event_id: str, invoice_id: str, status: str, currency
             else:
                 if order.status == 'pending_payment':
                     move_order(order, 'payment_verification', 'سفارش در مرحله بررسی پرداخت است.')
-                move_order(order, 'paid', 'پرداخت سفارش تأیید شد.')
+                if move_order(order, 'paid', 'پرداخت سفارش تأیید شد.'):
+                    telegram.notify_order_paid(order)
                 move_order(order, 'processing', 'سفارش در حال انجام است.')
         elif status in ('expired', 'failed'):
             move_order(order, 'pending_payment', 'برای ادامه، فاکتور پرداخت جدید ایجاد کنید.')

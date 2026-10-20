@@ -9,6 +9,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from catalog.models import Category, GiftCode, Product, Provider, Variant
+from catalog.seo_content import fill_seo_content
 from core.models import SiteSettings
 from payments.models import PaymentCurrency, PaymentNetwork
 
@@ -130,6 +131,7 @@ class Command(BaseCommand):
             variants = data.pop('variants')
             cat, prov, pid = data.pop('cat'), data.pop('prov'), data.pop('id')
             p, _ = Product.objects.update_or_create(id=pid, defaults=dict(data, category=cats[cat], provider=provs[prov]))
+            fill_seo_content(p)
             for v in variants:
                 v = dict(v)
                 vid = v.pop('id')

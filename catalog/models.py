@@ -1,7 +1,14 @@
+from decimal import Decimal
+
+from django.core.validators import MaxValueValidator
 from django.db import models
 from django.db.models import Count, Prefetch, Q
+from django.utils import timezone
 
 from core.ids import product_id, variant_id
+from core.utils import round_to_1000
+
+MAX_DISCOUNT_PERCENT = 90
 
 CATEGORY_ICONS = [('steam', 'Steam'), ('apple', 'Apple'), ('playstation', 'PlayStation'), ('tradingview', 'TradingView'), ('ai', 'AI')]
 PRODUCT_TYPES = [('gift_card', 'گیفت کارت'), ('account_recharge', 'شارژ حساب'), ('subscription', 'فعال‌سازی اشتراک')]
@@ -59,6 +66,18 @@ class Product(models.Model):
     required_fields = models.JSONField('فیلدهای موردنیاز از مشتری', default=list, blank=True)
     max_quantity_per_item = models.PositiveIntegerField('حداکثر تعداد در هر خرید', default=5)
     popularity = models.IntegerField('محبوبیت (ترتیب پیش‌فرض)', default=0)
+    # Discount on every variant of the product; 0 = none. Optional window, both ends may be empty.
+    discount_percent = models.PositiveSmallIntegerField(
+        'درصد تخفیف', default=0, validators=[MaxValueValidator(MAX_DISCOUNT_PERCENT)]
+    )
+    discount_starts_at = models.DateTimeField('شروع تخفیف', null=True, blank=True)
+    discount_ends_at = models.DateTimeField('پایان تخفیف', null=True, blank=True)
+    # SEO: an explanatory article (plain text; blank line = new paragraph, "## " = subheading, "- " = list item),
+    # product questions [{question, answer}] shown on the page and as FAQPage data, and optional meta overrides.
+    article = models.TextField('مقاله معرفی محصول', blank=True)
+    faqs = models.JSONField('سؤالات متداول محصول', default=list, blank=True)
+    seo_title = models.CharField('عنوان سئو', max_length=70, blank=True)
+    seo_description = models.CharField('توضیح متا', max_length=170, blank=True)
     is_active = models.BooleanField('منتشرشده', default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -70,6 +89,26 @@ class Product(models.Model):
 
     def __str__(self):
         return self.name
+
+    def active_discount_percent(self, at=None) -> int:
+        """The discount in force right now (0 outside its window)."""
+        if not self.discount_percent:
+            return 0
+        at = at or timezone.now()
+        if self.discount_starts_at and at < self.discount_starts_at:
+            return 0
+        if self.discount_ends_at and at >= self.discount_ends_at:
+            return 0
+        return min(self.discount_percent, MAX_DISCOUNT_PERCENT)
+
+
+def discounted_price(price: int, percent: int) -> int:
+    """Price after a percentage discount, rounded to 1,000 Toman. Never 0, never above the list price."""
+    price = int(price)
+    if not percent:
+        return price
+    final = round_to_1000(Decimal(price) * (100 - percent) / 100)
+    return final if 0 < final < price else price
 
 
 class Variant(models.Model):
@@ -99,6 +138,10 @@ class Variant(models.Model):
         if cached is not None:
             return cached
         return self.codes.filter(status='available').count()
+
+    def final_price(self, percent: int) -> int:
+        """What the customer pays, given the product's active discount percent."""
+        return discounted_price(self.price_toman, percent)
 
     @property
     def available(self) -> bool:

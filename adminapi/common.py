@@ -1,5 +1,7 @@
 import re
 
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.decorators import api_view, permission_classes
 
 from core.auth import IsStaff
@@ -75,6 +77,23 @@ class Form:
             self.err(key, 'مقدار خارج از محدوده مجاز است.')
             return
         self.clean[attr] = v
+
+    def datetime(self, key, attr):
+        """ISO 8601 date-time or empty (→ None). A value without an offset is read in the site's time zone."""
+        if self.skip(key):
+            return
+        raw = self.data.get(key)
+        if raw is None or str(raw).strip() == '':
+            self.clean[attr] = None
+            return
+        try:
+            v = parse_datetime(str(raw).strip())
+        except ValueError:
+            v = None
+        if v is None:
+            self.err(key, 'تاریخ و زمان معتبر وارد کنید.')
+            return
+        self.clean[attr] = timezone.make_aware(v) if timezone.is_naive(v) else v
 
     def boolean(self, key, attr):
         if self.skip(key):

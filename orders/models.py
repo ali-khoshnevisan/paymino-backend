@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from core.ids import order_id, order_item_id
@@ -15,7 +16,10 @@ class Order(models.Model):
     payment_status = models.CharField('وضعیت پرداخت', max_length=20, choices=PAYMENT_STATUSES, null=True, blank=True)
     subtotal_toman = models.PositiveBigIntegerField(default=0)
     service_fee_toman = models.PositiveBigIntegerField(default=0)
-    discount_toman = models.PositiveBigIntegerField(default=0)
+    discount_toman = models.PositiveBigIntegerField(default=0)  # product discounts
+    coupon = models.ForeignKey('orders.Coupon', on_delete=models.PROTECT, null=True, blank=True, related_name='orders', verbose_name='کد تخفیف')
+    coupon_code = models.CharField('کد تخفیف استفاده‌شده', max_length=40, blank=True)  # snapshot
+    coupon_discount_toman = models.PositiveBigIntegerField(default=0)
     total_toman = models.PositiveBigIntegerField(default=0)
     payment_currency = models.CharField(max_length=12, blank=True)
     payment_network = models.CharField(max_length=20, blank=True)
@@ -35,6 +39,32 @@ class Order(models.Model):
 
     def __str__(self):
         return self.number
+
+
+class Coupon(models.Model):
+    KINDS = [('percent', 'درصدی'), ('fixed', 'مبلغ ثابت')]
+
+    code = models.CharField('کد', max_length=40, unique=True)  # stored upper-case, see coupons.normalize_code
+    kind = models.CharField('نوع', max_length=10, choices=KINDS, default='percent')
+    value = models.PositiveBigIntegerField('مقدار', validators=[MinValueValidator(1)])  # percent (1–100) or Toman
+    max_discount_toman = models.PositiveBigIntegerField('سقف تخفیف (تومان)', null=True, blank=True)
+    min_order_toman = models.PositiveBigIntegerField('حداقل مبلغ سفارش (تومان)', default=0)
+    starts_at = models.DateTimeField('شروع', null=True, blank=True)
+    ends_at = models.DateTimeField('پایان', null=True, blank=True)
+    usage_limit = models.PositiveIntegerField('سقف کل استفاده', null=True, blank=True)
+    per_user_limit = models.PositiveIntegerField('سقف استفاده هر کاربر', null=True, blank=True, default=1,
+                                                 validators=[MinValueValidator(1), MaxValueValidator(1000)])
+    is_active = models.BooleanField('فعال', default=True)
+    note = models.CharField('یادداشت داخلی', max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'کد تخفیف'
+        verbose_name_plural = 'کدهای تخفیف'
+
+    def __str__(self):
+        return self.code
 
 
 class OrderItem(models.Model):

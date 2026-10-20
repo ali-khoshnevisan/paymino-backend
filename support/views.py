@@ -2,7 +2,7 @@ from django.db import transaction
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from core import mail
+from core import mail, telegram
 from core.auth import require_user
 from core.errors import ApiError, field_errors
 from core.models import Counter, SiteSettings
@@ -56,6 +56,7 @@ def tickets(request):
     with transaction.atomic():
         t = Ticket.objects.create(number=f'T-{Counter.next("ticket", 500)}', user=user, subject=subject, order=order)
         TicketMessage.objects.create(ticket=t, author=user, body=body)
+    telegram.notify_ticket(t, user, body, new=True)
     admin_email = SiteSettings.get().support_email
     if admin_email:
         mail.send(admin_email, f'درخواست جدید {t.number}', f'{user.email}\n{subject}\n\n{body}')
@@ -83,4 +84,5 @@ def ticket_message(request, ticket_id):
     TicketMessage.objects.create(ticket=t, author=user, body=body)
     t.status = 'open'
     t.save(update_fields=['status', 'updated_at'])
+    telegram.notify_ticket(t, user, body, new=False)
     return Response(ticket_dto(_owned(user, t.pk)))

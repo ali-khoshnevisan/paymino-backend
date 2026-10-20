@@ -33,6 +33,9 @@ def product_dto(p, with_variants=True):
         'deliveryMethod': p.delivery_method, 'fulfillmentEstimate': p.fulfillment_estimate, 'refundPolicy': p.refund_policy,
         'requiredFields': p.required_fields or [], 'maxQuantityPerItem': p.max_quantity_per_item, 'popularity': p.popularity,
         'isActive': p.is_active, 'createdAt': iso(p.created_at), 'updatedAt': iso(p.updated_at),
+        'discountPercent': p.discount_percent, 'discountStartsAt': iso(p.discount_starts_at), 'discountEndsAt': iso(p.discount_ends_at),
+        'discountActive': p.active_discount_percent() > 0,
+        'article': p.article, 'faqs': p.faqs or [], 'seoTitle': p.seo_title, 'seoDescription': p.seo_description,
     }
     if with_variants:
         d['variants'] = [variant_dto(v) for v in p.variants.all()]
@@ -50,6 +53,7 @@ def product_row(p):
         'stock': sum(v.stock for v in code_variants) if code_variants else None,
         'lowStock': any(v.stock == 0 for v in code_variants),
         'popularity': p.popularity, 'createdAt': iso(p.created_at),
+        'discountPercent': p.active_discount_percent() or None,
     }
 
 

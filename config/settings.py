@@ -17,7 +17,12 @@ def _load_dotenv(path: Path):
         if not line or line.startswith('#') or '=' not in line:
             continue
         key, _, value = line.partition('=')
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        value = value.strip()
+        if value[:1] in ('"', "'"):
+            value = value[1:].partition(value[0])[0]
+        else:
+            value = value.split(' #', 1)[0].split('\t#', 1)[0].strip()  # inline comment
+        os.environ.setdefault(key.strip(), value)
 
 
 _load_dotenv(BASE_DIR / '.env')
@@ -205,6 +210,11 @@ if PAYMENT_PROVIDER == 'plisio' and not PLISIO_SECRET_KEY:
     raise RuntimeError('PLISIO_SECRET_KEY must be set when PAYMENT_PROVIDER=plisio.')
 if not DEBUG and PAYMENT_PROVIDER == 'sandbox' and not env_bool('ALLOW_SANDBOX_IN_PRODUCTION', False):
     raise RuntimeError('PAYMENT_PROVIDER=sandbox is not allowed with DEBUG off.')
+
+# ------------------------------- Telegram (admin notifications) -------------------------------
+# Empty token or chat id = notifications off.
+TELEGRAM_BOT_TOKEN = env('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = env('TELEGRAM_CHAT_ID')
 
 LOGGING = {
     'version': 1,
