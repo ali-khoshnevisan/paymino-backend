@@ -51,6 +51,11 @@ ALLOWED_HOSTS = env_list('ALLOWED_HOSTS', 'localhost,127.0.0.1')
 FRONTEND_URL = env('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 API_PUBLIC_URL = env('API_PUBLIC_URL', 'http://localhost:8000').rstrip('/')
 
+# Sign in with Google (OAuth web client). Both empty = the option is hidden.
+# Authorised redirect URI in Google Cloud Console: {API_PUBLIC_URL}/api/auth/google/callback
+GOOGLE_CLIENT_ID = env('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = env('GOOGLE_CLIENT_SECRET')
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',

@@ -1,9 +1,12 @@
 from django.urls import path
 
-from . import views
+from . import google, views
 
 urlpatterns = [
     path('register', views.register),
+    path('providers', google.providers),
+    path('google/start', google.google_start),
+    path('google/callback', google.google_callback),
     path('login', views.login_view),
     path('logout', views.logout_view),
     path('me', views.me),

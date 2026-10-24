@@ -1,6 +1,8 @@
+import base64
 import hashlib
 import hmac
 import json
+import time
 from datetime import timedelta
 from unittest import mock
 
@@ -491,3 +493,96 @@ class AdminApiTests(Base):
         self.assertEqual(d['needsAction']['count'], 1)
         self.assertEqual(len(d['series']), 30)
         self.assertGreater(d['revenue']['today'], 0)
+
+
+def fake_id_token(**claims):
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b'=').decode()  # noqa: E731
+    return f"{enc({'alg': 'RS256'})}.{enc(claims)}.sig"
+
+
+@override_settings(DEBUG=True, GOOGLE_CLIENT_ID='cid.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET='secret',
+                   FRONTEND_URL='http://localhost:3000', API_PUBLIC_URL='http://localhost:8000')
+class GoogleSignInTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.c = Client()
+
+    def start(self, next_path='/checkout?step=4'):
+        r = self.c.get('/api/auth/google/start', {'next': next_path})
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r['Location'].startswith('https://accounts.google.com/o/oauth2/v2/auth?'))
+        return self.c.session['google_oauth']
+
+    def callback(self, flow, token_status=200, **claims):
+        base = {'iss': 'https://accounts.google.com', 'aud': 'cid.apps.googleusercontent.com', 'sub': 'g-123',
+                'email': 'Ali@Example.com', 'email_verified': True, 'name': 'علی', 'exp': int(time.time()) + 300,
+                'nonce': flow['nonce']}
+        resp = mock.Mock(status_code=token_status, text='')
+        resp.json.return_value = {'id_token': fake_id_token(**{**base, **claims})}
+        with mock.patch('accounts.google.requests.post', return_value=resp) as post:
+            r = self.c.get('/api/auth/google/callback', {'state': flow['state'], 'code': 'abc'})
+        return r, post
+
+    def test_disabled_without_credentials(self):
+        with override_settings(GOOGLE_CLIENT_ID='', GOOGLE_CLIENT_SECRET=''):
+            self.assertEqual(self.c.get('/api/auth/providers').json(), {'google': False})
+            r = self.c.get('/api/auth/google/start')
+            self.assertIn('/auth/login?error=google_unavailable', r['Location'])
+        self.assertEqual(self.c.get('/api/auth/providers').json(), {'google': True})
+
+    def test_new_user_signs_up_and_returns_to_page(self):
+        flow = self.start()
+        r, post = self.callback(flow)
+        self.assertEqual(r['Location'], 'http://localhost:3000/checkout?step=4')
+        self.assertEqual(post.call_args.kwargs['data']['code_verifier'], flow['verifier'])  # PKCE
+        user = User.objects.get(email='ali@example.com')
+        self.assertTrue(user.email_verified)
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual((user.google_sub, user.full_name), ('g-123', 'علی'))
+        self.assertEqual(self.c.get('/api/auth/me').json()['user']['email'], 'ali@example.com')
+
+    def test_existing_account_is_linked(self):
+        user = User.objects.create_user('ali@example.com', 'Test1234', full_name='علی')
+        r, _ = self.callback(self.start())
+        self.assertEqual(r['Location'], 'http://localhost:3000/checkout?step=4')
+        user.refresh_from_db()
+        self.assertEqual((user.google_sub, user.email_verified, user.check_password('Test1234')), ('g-123', True, True))
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_rejections(self):
+        cases = [
+            ({'aud': 'someone-else'}, 'google_failed'),
+            ({'nonce': 'replayed'}, 'google_failed'),
+            ({'iss': 'https://evil.example'}, 'google_failed'),
+            ({'exp': int(time.time()) - 10}, 'google_failed'),
+            ({'email_verified': False}, 'google_email_unverified'),
+        ]
+        for claims, error in cases:
+            r, _ = self.callback(self.start(), **claims)
+            self.assertIn(f'error={error}', r['Location'], claims)
+        r, _ = self.callback(self.start(), token_status=400)
+        self.assertIn('error=google_failed', r['Location'])
+        self.assertEqual(User.objects.count(), 0)
+        self.assertEqual(self.c.get('/api/auth/me').status_code, 401)
+
+    def test_state_must_match_and_is_single_use(self):
+        flow = self.start()
+        r = self.c.get('/api/auth/google/callback', {'state': 'forged', 'code': 'abc'})
+        self.assertIn('error=google_expired', r['Location'])
+        r, _ = self.callback(flow)  # the flow was consumed by the forged attempt
+        self.assertIn('error=google_expired', r['Location'])
+        r = self.c.get('/api/auth/google/callback', {'error': 'access_denied', 'state': 'x'})
+        self.assertIn('error=google_cancelled', r['Location'])
+
+    def test_disabled_account_and_conflicting_link(self):
+        User.objects.create_user('ali@example.com', 'Test1234', full_name='علی', is_active=False)
+        r, _ = self.callback(self.start())
+        self.assertIn('error=google_disabled', r['Location'])
+        User.objects.filter(email='ali@example.com').update(is_active=True, google_sub='g-other')
+        r, _ = self.callback(self.start())
+        self.assertIn('error=google_conflict', r['Location'])
+
+    def test_next_must_stay_on_site(self):
+        for bad in ('//evil.example/x', 'https://evil.example', '/\\evil.example', 'javascript:alert(1)'):
+            self.assertEqual(self.start(bad)['next'], '/account', bad)

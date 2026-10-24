@@ -29,6 +29,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     full_name = models.CharField('نام و نام خانوادگی', max_length=120)
     phone = models.CharField('موبایل', max_length=11, unique=True, null=True, blank=True)
     email_verified = models.BooleanField('ایمیل تأیید شده', default=False)
+    google_sub = models.CharField('شناسه گوگل', max_length=255, unique=True, null=True, blank=True, editable=False)
     verification_code = models.CharField(max_length=6, blank=True, default='')
     verification_sent_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField('فعال', default=True)
